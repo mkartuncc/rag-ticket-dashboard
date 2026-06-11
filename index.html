@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Ticket Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f0f2f5; color: #333; }
+  header { background: #1a73e8; color: #fff; padding: 18px 32px; display: flex; align-items: center; justify-content: space-between; }
+  header h1 { font-size: 1.4rem; font-weight: 600; }
+  #refresh-btn { background: rgba(255,255,255,0.2); border: 1px solid rgba(255,255,255,0.5); color: #fff; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }
+  #refresh-btn:hover { background: rgba(255,255,255,0.3); }
+  .stats { display: flex; gap: 16px; padding: 24px 32px 0; flex-wrap: wrap; }
+  .stat-card { background: #fff; border-radius: 8px; padding: 16px 24px; min-width: 140px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .stat-card .num { font-size: 2rem; font-weight: 700; }
+  .stat-card .label { font-size: 0.8rem; color: #666; margin-top: 4px; }
+  .stat-card.total .num { color: #1a73e8; }
+  .stat-card.pending .num { color: #f9ab00; }
+  .stat-card.approved .num { color: #34a853; }
+  .stat-card.review .num { color: #ea4335; }
+  #error-banner { margin: 16px 32px; background: #fce8e6; color: #c5221f; padding: 12px 16px; border-radius: 6px; display: none; }
+  .table-wrap { margin: 20px 32px; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); overflow: hidden; }
+  .table-header { padding: 16px 20px; border-bottom: 1px solid #e8eaed; display: flex; align-items: center; gap: 12px; }
+  .table-header h2 { font-size: 1rem; font-weight: 600; }
+  select { border: 1px solid #dadce0; border-radius: 4px; padding: 5px 8px; font-size: 0.85rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th { background: #f8f9fa; padding: 10px 16px; text-align: left; font-weight: 600; color: #555; border-bottom: 1px solid #e8eaed; white-space: nowrap; }
+  td { padding: 10px 16px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8fbff; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+  .badge.pending_eval { background: #fef3cd; color: #856404; }
+  .badge.approved { background: #d1e7dd; color: #0a3622; }
+  .badge.needs_review { background: #f8d7da; color: #58151c; }
+  .truncate { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .expand { cursor: pointer; color: #1a73e8; font-size: 0.75rem; margin-top: 4px; display: inline-block; }
+  .score-pill { font-weight: 700; font-size: 0.8rem; }
+  .score-high { color: #34a853; }
+  .score-low { color: #ea4335; }
+  .loading { text-align: center; padding: 40px; color: #888; }
+  .modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 100; align-items: center; justify-content: center; }
+  .modal-overlay.active { display: flex; }
+  .modal { background: #fff; border-radius: 10px; padding: 24px; max-width: 640px; width: 90%; max-height: 80vh; overflow-y: auto; }
+  .modal h3 { margin-bottom: 12px; font-size: 1rem; }
+  .modal p { font-size: 0.88rem; line-height: 1.6; white-space: pre-wrap; }
+  .modal-close { float: right; cursor: pointer; font-size: 1.2rem; line-height: 1; color: #888; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>RAG Ticket Dashboard</h1>
+  <button id="refresh-btn" onclick="loadTickets()">&#8635; Refresh</button>
+</header>
+
+<div class="stats">
+  <div class="stat-card total"><div class="num" id="cnt-total">—</div><div class="label">Total</div></div>
+  <div class="stat-card pending"><div class="num" id="cnt-pending">—</div><div class="label">Pending Eval</div></div>
+  <div class="stat-card approved"><div class="num" id="cnt-approved">—</div><div class="label">Approved</div></div>
+  <div class="stat-card review"><div class="num" id="cnt-review">—</div><div class="label">Needs Review</div></div>
+</div>
+
+<div id="error-banner"></div>
+
+<div class="table-wrap">
+  <div class="table-header">
+    <h2>Tickets</h2>
+    <select id="filter" onchange="renderTable()">
+      <option value="">All statuses</option>
+      <option value="pending_eval">Pending Eval</option>
+      <option value="approved">Approved</option>
+      <option value="needs_review">Needs Review</option>
+    </select>
+  </div>
+  <div id="table-container"><div class="loading">Loading tickets…</div></div>
+</div>
+
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <span class="modal-close" onclick="closeModal()">&#10005;</span>
+    <h3 id="modal-title"></h3>
+    <p id="modal-body"></p>
+  </div>
+</div>
+
+<script>
+const API = 'https://v2sf4znpwe.execute-api.us-east-1.amazonaws.com/prod/tickets';
+let allTickets = [];
+
+async function loadTickets() {
+  document.getElementById('table-container').innerHTML = '<div class="loading">Loading…</div>';
+  document.getElementById('error-banner').style.display = 'none';
+  try {
+    const r = await fetch(API);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    allTickets = await r.json();
+    updateStats();
+    renderTable();
+  } catch (e) {
+    const b = document.getElementById('error-banner');
+    b.textContent = 'Failed to load tickets: ' + e.message;
+    b.style.display = 'block';
+    document.getElementById('table-container').innerHTML = '';
+  }
+}
+
+function updateStats() {
+  document.getElementById('cnt-total').textContent = allTickets.length;
+  document.getElementById('cnt-pending').textContent = allTickets.filter(t=>t.status==='pending_eval').length;
+  document.getElementById('cnt-approved').textContent = allTickets.filter(t=>t.status==='approved').length;
+  document.getElementById('cnt-review').textContent = allTickets.filter(t=>t.status==='needs_review').length;
+}
+
+function renderTable() {
+  const filter = document.getElementById('filter').value;
+  const rows = filter ? allTickets.filter(t=>t.status===filter) : allTickets;
+  if (!rows.length) {
+    document.getElementById('table-container').innerHTML = '<div class="loading">No tickets found.</div>';
+    return;
+  }
+  const html = `
+    <table>
+      <thead><tr>
+        <th>Ticket ID</th><th>Sender</th><th>Question</th><th>Route</th>
+        <th>Status</th><th>Score</th><th>Created</th>
+      </tr></thead>
+      <tbody>${rows.map(t=>`
+        <tr>
+          <td style="font-family:monospace;font-size:.78rem">${t.ticket_id.slice(0,8)}…</td>
+          <td>${esc(t.sender_email||'')}</td>
+          <td>
+            <div class="truncate">${esc(t.question||'')}</div>
+            <span class="expand" onclick='openModal(${JSON.stringify(JSON.stringify(t))})'>view answer</span>
+          </td>
+          <td>${esc(t.route||'')}</td>
+          <td><span class="badge ${t.status}">${t.status}</span></td>
+          <td>${t.eval_score!=null?`<span class="score-pill ${t.eval_score>=6?'score-high':'score-low'}">${t.eval_score}/10</span>`:'—'}</td>
+          <td style="white-space:nowrap;font-size:.78rem">${(t.created_at||'').replace('T',' ').slice(0,16)}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  document.getElementById('table-container').innerHTML = html;
+}
+
+function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function openModal(jsonStr) {
+  const t = JSON.parse(jsonStr);
+  document.getElementById('modal-title').textContent = 'Q: ' + (t.question||'');
+  document.getElementById('modal-body').textContent =
+    'Answer:\n' + (t.answer||'N/A') +
+    (t.eval_feedback ? '\n\nEval Feedback:\n' + t.eval_feedback : '');
+  document.getElementById('modal').classList.add('active');
+}
+function closeModal(){ document.getElementById('modal').classList.remove('active'); }
+
+loadTickets();
+</script>
+</body>
+</html>
